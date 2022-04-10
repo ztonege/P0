@@ -29,7 +29,9 @@ func (kvs *keyValueServer) Start(port int) error {
 	// Create a server and listen to port
 	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
+		// FIXME: remove print line.
 		fmt.Println("Error listening:", err.Error())
+		// FIXME: can't use os package.
 		os.Exit(1)
 	}
 
@@ -39,8 +41,9 @@ func (kvs *keyValueServer) Start(port int) error {
 			// Wait for a connection
 			conn, err := ln.Accept()
 			if err != nil {
-				// handle error
+				// FIXME: remove print line.
 				fmt.Println("Error accepting: ", err.Error())
+				// FIXME: can't use os package
 				os.Exit(1)
 			}
 			go handleConnection(conn)
