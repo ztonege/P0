@@ -8,18 +8,67 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/cmu440/p0partA/kvstore"
 )
 
+type Operation int
+
+const (
+	Get Operation = iota
+	Put
+	Update
+	Delete
+	Undefined
+)
+
+func ToOperation(opString string) (Operation, error) {
+	var op Operation
+	switch opString {
+	case "Get":
+		op = Get
+	case "Put":
+		op = Put
+	case "Update":
+		op = Update
+	case "Delete":
+		op = Delete
+	default:
+		return Undefined, fmt.Errorf("Operation undefined!")
+	}
+	return op, nil
+}
+
+func (op Operation) String() string {
+	switch op {
+	case Get:
+		return "Get"
+	case Put:
+		return "Put"
+	case Update:
+		return "Update"
+	case Delete:
+		return "Delete"
+	default:
+		return ""
+	}
+}
+
 type keyValueServer struct {
-	// TODO: implement this!
 	store               kvstore.KVStore
-	port                int
 	clientPool          map[string]*client
 	registrationChannel chan *client
 	removalChannel      chan string
 	dropped             int
+	actionChannel       chan action
+}
+
+type action struct {
+	op     Operation
+	key    string
+	values [][]byte
+	cli    *client
 }
 
 type client struct {
@@ -28,7 +77,7 @@ type client struct {
 	writer *bufio.Writer
 	conn   net.Conn
 	// FIXME: think of a better name
-	channel chan string
+	channel chan [][]byte
 }
 
 func (cli client) String() string {
@@ -41,7 +90,8 @@ func New(store kvstore.KVStore) KeyValueServer {
 	clientPool := map[string]*client{}
 	registrationChannel := make(chan *client)
 	removalChannel := make(chan string)
-	kvs := &keyValueServer{store: store, clientPool: clientPool, registrationChannel: registrationChannel, removalChannel: removalChannel}
+	actionChannel := make(chan action)
+	kvs := &keyValueServer{store: store, clientPool: clientPool, registrationChannel: registrationChannel, removalChannel: removalChannel, actionChannel: actionChannel}
 	return kvs
 }
 
@@ -52,17 +102,18 @@ func (kvs *keyValueServer) Start(port int) error {
 	if err != nil {
 		// FIXME: remove print line.
 		fmt.Println("Error listening:", err.Error())
-		// FIXME: can't use os package.
-		os.Exit(1)
+		return err
 	}
-	kvs.port = port
-	// Client registration and removal handling
-	go poolAdminstration(kvs)
+	// Routine for handling client registration and removal
+	go handlePoolAdminstration(kvs)
 
-	// Concurrently listen to multiple clients
+	// Routine for handling kv actions
+	go handleKvActions(kvs)
+
+	// Routine for concurrently listening on multiple clients
 	go handleClients(ln, kvs)
 
-	return err
+	return nil
 }
 
 func (kvs *keyValueServer) Close() {
@@ -80,7 +131,7 @@ func (kvs *keyValueServer) CountDropped() int {
 }
 
 // Client registration and removal handling
-func poolAdminstration(kvs *keyValueServer) {
+func handlePoolAdminstration(kvs *keyValueServer) {
 	for {
 		select {
 		// Handle client registrations
@@ -112,6 +163,23 @@ func handleClients(ln net.Listener, kvs *keyValueServer) {
 	}
 }
 
+func handleKvActions(kvs *keyValueServer) {
+	for act := range kvs.actionChannel {
+		// TODO: handle failures
+		switch act.op {
+		case Get:
+			value := kvs.store.Get(act.key)
+			act.cli.channel <- value
+		case Put:
+			kvs.store.Put(act.key, act.values[0])
+		case Update:
+			kvs.store.Update(act.key, act.values[0], act.values[1])
+		case Delete:
+			kvs.store.Delete(act.key)
+		}
+	}
+}
+
 // Handles incoming requests.
 func handleConnection(conn net.Conn, kvs *keyValueServer) {
 	// Register client: create client + add to client pool
@@ -124,13 +192,24 @@ func handleConnection(conn net.Conn, kvs *keyValueServer) {
 		switch err {
 		// Handle Get, Put, Update, Delete
 		case nil:
-			// Send a response back to person contacting us.
-			_, writeErr := cli.writer.WriteString("Message Received: " + message)
-			if writeErr != nil {
-				fmt.Println("Error writing:", writeErr.Error())
+			// Parse the message into actions
+			act := messageToAction(message, cli)
+			// Send to actionChannel to handle action
+			kvs.actionChannel <- act
+
+			// If Get, need to send responses to client
+			if act.op == Get {
+				values := <-cli.channel
+				// Send responses
+				for _, value := range values {
+					response := fmt.Sprintf("%v:%v\n", act.key, string(value))
+					_, writeErr := cli.writer.WriteString(response)
+					if writeErr != nil {
+						fmt.Println("Error writing:", writeErr.Error())
+					}
+					cli.writer.Flush()
+				}
 			}
-			cli.writer.Flush()
-			fmt.Printf("[%v] %v", cli.id, message)
 		// Check if client closed or terminated connection
 		case io.EOF:
 			removeClient(cli.id, kvs)
@@ -145,7 +224,7 @@ func handleConnection(conn net.Conn, kvs *keyValueServer) {
 func registerClient(conn net.Conn, kvs *keyValueServer) *client {
 	id := conn.RemoteAddr().String()
 	reader, writer := bufio.NewReader(conn), bufio.NewWriter(conn)
-	channel := make(chan string)
+	channel := make(chan [][]byte)
 	cli := &client{id: id, reader: reader, writer: writer, conn: conn, channel: channel}
 	// FIXME: only sends to registration channel now, does not wait for confirmation
 	kvs.registrationChannel <- cli
@@ -154,4 +233,24 @@ func registerClient(conn net.Conn, kvs *keyValueServer) *client {
 
 func removeClient(id string, kvs *keyValueServer) {
 	kvs.removalChannel <- id
+}
+
+func messageToAction(message string, cli *client) action {
+	// Parse the message into actions
+	splitted := parseMessage(message)
+	op, _ := ToOperation(splitted[0])
+	key, values := splitted[1], [][]byte{}
+	for _, value := range splitted[2:] {
+		values = append(values, []byte(value))
+	}
+
+	act := action{op: op, key: key, values: values, cli: cli}
+	return act
+}
+
+// FIXME: cannot use strings package
+func parseMessage(message string) []string {
+	message = strings.TrimRight(message, "\r\n")
+	splitted := strings.Split(message, ":")
+	return splitted
 }
