@@ -13,18 +13,18 @@ import (
 	"github.com/cmu440/p0partA/kvstore"
 )
 
-type Operation int
+type ActionOperation int
 
 const (
-	Get Operation = iota
+	Get ActionOperation = iota
 	Put
 	Update
 	Delete
 	Undefined
 )
 
-func ToOperation(opString string) (Operation, error) {
-	var op Operation
+func ToActionOperation(opString string) (ActionOperation, error) {
+	var op ActionOperation
 	switch opString {
 	case "Get":
 		op = Get
@@ -35,12 +35,12 @@ func ToOperation(opString string) (Operation, error) {
 	case "Delete":
 		op = Delete
 	default:
-		return Undefined, fmt.Errorf("Operation undefined!")
+		return Undefined, fmt.Errorf("ActionOperation undefined!")
 	}
 	return op, nil
 }
 
-func (op Operation) String() string {
+func (op ActionOperation) String() string {
 	switch op {
 	case Get:
 		return "Get"
@@ -55,17 +55,30 @@ func (op Operation) String() string {
 	}
 }
 
+type CountOperation int
+
+const (
+	Active CountOperation = iota
+	Dropped
+)
+
 type keyValueServer struct {
 	store               kvstore.KVStore
 	clientPool          map[string]*client
 	registrationChannel chan *client
 	removalChannel      chan string
 	dropped             int
+	countChannel        chan count
 	actionChannel       chan action
 }
 
+type count struct {
+	op    CountOperation
+	value int
+}
+
 type action struct {
-	op     Operation
+	op     ActionOperation
 	key    string
 	values [][]byte
 	cli    *client
@@ -91,7 +104,8 @@ func New(store kvstore.KVStore) KeyValueServer {
 	registrationChannel := make(chan *client)
 	removalChannel := make(chan string)
 	actionChannel := make(chan action)
-	kvs := &keyValueServer{store: store, clientPool: clientPool, registrationChannel: registrationChannel, removalChannel: removalChannel, actionChannel: actionChannel}
+	countChannel := make(chan count)
+	kvs := &keyValueServer{store: store, clientPool: clientPool, registrationChannel: registrationChannel, removalChannel: removalChannel, actionChannel: actionChannel, countChannel: countChannel}
 	return kvs
 }
 
@@ -121,13 +135,21 @@ func (kvs *keyValueServer) Close() {
 }
 
 func (kvs *keyValueServer) CountActive() int {
-	// TODO: implement this!
-	return len(kvs.clientPool)
+	// FIXME:
+	// 1. Same channel used for both request/response: do we want to separate these two?
+	// 2. Cannot identify if it is active or dropped count. Will not work if there are multiple routines asking for counts.
+	kvs.countChannel <- count{op: Active}
+	c := <-kvs.countChannel
+	return c.value
 }
 
 func (kvs *keyValueServer) CountDropped() int {
-	// TODO: implement this!
-	return kvs.dropped
+	// FIXME:
+	// 1. Same channel used for both request/response: do we want to separate these two?
+	// 2. Cannot identify if it is active or dropped count. Will not work if there are multiple routines asking for counts.
+	kvs.countChannel <- count{op: Dropped}
+	c := <-kvs.countChannel
+	return c.value
 }
 
 // Client registration and removal handling
@@ -145,6 +167,13 @@ func handlePoolAdminstration(kvs *keyValueServer) {
 			}
 			delete(kvs.clientPool, id)
 			kvs.dropped++
+		case c := <-kvs.countChannel:
+			switch c.op {
+			case Active:
+				kvs.countChannel <- count{value: len(kvs.clientPool)}
+			case Dropped:
+				kvs.countChannel <- count{value: kvs.dropped}
+			}
 		}
 	}
 }
@@ -238,7 +267,7 @@ func removeClient(id string, kvs *keyValueServer) {
 func messageToAction(message string, cli *client) action {
 	// Parse the message into actions
 	splitted := parseMessage(message)
-	op, _ := ToOperation(splitted[0])
+	op, _ := ToActionOperation(splitted[0])
 	key, values := splitted[1], [][]byte{}
 	for _, value := range splitted[2:] {
 		values = append(values, []byte(value))
