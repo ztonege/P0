@@ -68,16 +68,16 @@ type keyValueServer struct {
 	registrationChannel chan *client
 	removalChannel      chan string
 	dropped             int
-	countChannel        chan count
-	actionChannel       chan action
+	countChannel        chan countRequest
+	actionChannel       chan actionRequest
 }
 
-type count struct {
-	op    CountOperation
-	value int
+type countRequest struct {
+	op      CountOperation
+	channel chan int
 }
 
-type action struct {
+type actionRequest struct {
 	op     ActionOperation
 	key    string
 	values [][]byte
@@ -103,8 +103,8 @@ func New(store kvstore.KVStore) KeyValueServer {
 	clientPool := map[string]*client{}
 	registrationChannel := make(chan *client)
 	removalChannel := make(chan string)
-	actionChannel := make(chan action)
-	countChannel := make(chan count)
+	actionChannel := make(chan actionRequest)
+	countChannel := make(chan countRequest)
 	kvs := &keyValueServer{store: store, clientPool: clientPool, registrationChannel: registrationChannel, removalChannel: removalChannel, actionChannel: actionChannel, countChannel: countChannel}
 	return kvs
 }
@@ -135,21 +135,19 @@ func (kvs *keyValueServer) Close() {
 }
 
 func (kvs *keyValueServer) CountActive() int {
-	// FIXME:
-	// 1. Same channel used for both request/response: do we want to separate these two?
-	// 2. Cannot identify if it is active or dropped count. Will not work if there are multiple routines asking for counts.
-	kvs.countChannel <- count{op: Active}
-	c := <-kvs.countChannel
-	return c.value
+	// Create channel to get response. Supports multiple routines asking for counts.
+	ch := make(chan int)
+	kvs.countChannel <- countRequest{op: Active, channel: ch}
+	activeCount := <-ch
+	return activeCount
 }
 
 func (kvs *keyValueServer) CountDropped() int {
-	// FIXME:
-	// 1. Same channel used for both request/response: do we want to separate these two?
-	// 2. Cannot identify if it is active or dropped count. Will not work if there are multiple routines asking for counts.
-	kvs.countChannel <- count{op: Dropped}
-	c := <-kvs.countChannel
-	return c.value
+	// Create channel to get response. Supports multiple routines asking for counts.
+	ch := make(chan int)
+	kvs.countChannel <- countRequest{op: Dropped, channel: ch}
+	droppedCount := <-ch
+	return droppedCount
 }
 
 // Client registration and removal handling
@@ -167,12 +165,12 @@ func handlePoolAdminstration(kvs *keyValueServer) {
 			}
 			delete(kvs.clientPool, id)
 			kvs.dropped++
-		case c := <-kvs.countChannel:
-			switch c.op {
+		case request := <-kvs.countChannel:
+			switch request.op {
 			case Active:
-				kvs.countChannel <- count{value: len(kvs.clientPool)}
+				request.channel <- len(kvs.clientPool)
 			case Dropped:
-				kvs.countChannel <- count{value: kvs.dropped}
+				request.channel <- kvs.dropped
 			}
 		}
 	}
@@ -264,7 +262,7 @@ func removeClient(id string, kvs *keyValueServer) {
 	kvs.removalChannel <- id
 }
 
-func messageToAction(message string, cli *client) action {
+func messageToAction(message string, cli *client) actionRequest {
 	// Parse the message into actions
 	splitted := parseMessage(message)
 	op, _ := ToActionOperation(splitted[0])
@@ -273,7 +271,7 @@ func messageToAction(message string, cli *client) action {
 		values = append(values, []byte(value))
 	}
 
-	act := action{op: op, key: key, values: values, cli: cli}
+	act := actionRequest{op: op, key: key, values: values, cli: cli}
 	return act
 }
 
