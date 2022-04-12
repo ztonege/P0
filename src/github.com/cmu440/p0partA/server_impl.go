@@ -4,11 +4,11 @@ package p0partA
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"strings"
 
 	"github.com/cmu440/p0partA/kvstore"
 )
@@ -228,7 +228,7 @@ func handleKvActions(kvs *keyValueServer) {
 func handleRead(cli *client, kvs *keyValueServer) {
 	for {
 		// Listen to client
-		message, err := cli.reader.ReadString('\n')
+		message, err := cli.reader.ReadBytes(byte('\n'))
 		switch err {
 		// Handle Get, Put, Update, Delete
 		case nil:
@@ -273,11 +273,11 @@ func removeClient(id string, kvs *keyValueServer) {
 	kvs.removalChannel <- id
 }
 
-func messageToAction(message string, cli *client) actionRequest {
+func messageToAction(message []byte, cli *client) actionRequest {
 	// Parse the message into actions
 	splitted := parseMessage(message)
-	op, _ := ToActionOperation(splitted[0])
-	key, values := splitted[1], [][]byte{}
+	op, _ := ToActionOperation(string(splitted[0]))
+	key, values := string(splitted[1]), [][]byte{}
 	for _, value := range splitted[2:] {
 		values = append(values, []byte(value))
 	}
@@ -287,8 +287,8 @@ func messageToAction(message string, cli *client) actionRequest {
 }
 
 // FIXME: cannot use strings package
-func parseMessage(message string) []string {
-	message = strings.TrimRight(message, "\r\n")
-	splitted := strings.Split(message, ":")
+func parseMessage(message []byte) [][]byte {
+	message = message[:len(message)-1]
+	splitted := bytes.Split(message, []byte(":"))
 	return splitted
 }
