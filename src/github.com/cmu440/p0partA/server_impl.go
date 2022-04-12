@@ -1,5 +1,3 @@
-// Implementation of a KeyValueServer. Students should write their code in this file.
-
 package p0partA
 
 import (
@@ -8,13 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 
 	"github.com/cmu440/p0partA/kvstore"
 )
 
 type ActionOperation int
+type CountOperation int
 
+const bufferSize = 500
 const (
 	Get ActionOperation = iota
 	Put
@@ -22,8 +21,10 @@ const (
 	Delete
 	Undefined
 )
-
-const bufferSize = 500
+const (
+	Active CountOperation = iota
+	Dropped
+)
 
 func ToActionOperation(opString string) (ActionOperation, error) {
 	var op ActionOperation
@@ -36,33 +37,9 @@ func ToActionOperation(opString string) (ActionOperation, error) {
 		op = Update
 	case "Delete":
 		op = Delete
-	default:
-		return Undefined, fmt.Errorf("ActionOperation undefined!")
 	}
 	return op, nil
 }
-
-func (op ActionOperation) String() string {
-	switch op {
-	case Get:
-		return "Get"
-	case Put:
-		return "Put"
-	case Update:
-		return "Update"
-	case Delete:
-		return "Delete"
-	default:
-		return ""
-	}
-}
-
-type CountOperation int
-
-const (
-	Active CountOperation = iota
-	Dropped
-)
 
 type keyValueServer struct {
 	store               kvstore.KVStore
@@ -92,11 +69,10 @@ type response struct {
 }
 
 type client struct {
-	id     string
-	reader *bufio.Reader
-	writer *bufio.Writer
-	conn   net.Conn
-	// FIXME: think of a better name
+	id      string
+	reader  *bufio.Reader
+	writer  *bufio.Writer
+	conn    net.Conn
 	channel chan response
 }
 
@@ -110,7 +86,6 @@ func (cli client) isBufferFull() bool {
 
 // New creates and returns (but does not start) a new KeyValueServer.
 func New(store kvstore.KVStore) KeyValueServer {
-	// TODO: implement this!
 	clientPool := map[string]*client{}
 	registrationChannel := make(chan *client)
 	removalChannel := make(chan string)
@@ -120,13 +95,10 @@ func New(store kvstore.KVStore) KeyValueServer {
 	return kvs
 }
 
-// Reference: https://pkg.go.dev/net@go1.17.6
 func (kvs *keyValueServer) Start(port int) error {
 	// Create a server and listen to port
 	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
-		// FIXME: remove print line.
-		fmt.Println("Error listening:", err.Error())
 		return err
 	}
 	// Routine for handling client registration and removal
@@ -142,7 +114,6 @@ func (kvs *keyValueServer) Start(port int) error {
 }
 
 func (kvs *keyValueServer) Close() {
-	// TODO: implement this!
 }
 
 func (kvs *keyValueServer) CountActive() int {
@@ -170,10 +141,6 @@ func handlePoolAdminstration(kvs *keyValueServer) {
 			kvs.clientPool[cli.id] = cli
 		// Handle client removals
 		case id := <-kvs.removalChannel:
-			_, ok := kvs.clientPool[id]
-			if !ok {
-				fmt.Printf("%v does not exist in clientPool!", id)
-			}
 			delete(kvs.clientPool, id)
 			kvs.dropped++
 		case request := <-kvs.countChannel:
@@ -190,13 +157,7 @@ func handlePoolAdminstration(kvs *keyValueServer) {
 func handleClients(ln net.Listener, kvs *keyValueServer) {
 	for {
 		// Wait for a connection
-		conn, err := ln.Accept()
-		if err != nil {
-			// FIXME: remove print line.
-			fmt.Println("Error accepting: ", err.Error())
-			// FIXME: can't use os package
-			os.Exit(1)
-		}
+		conn, _ := ln.Accept()
 		cli := registerClient(conn, kvs)
 		go handleRead(cli, kvs)
 		go handleWrite(cli, kvs)
@@ -205,7 +166,6 @@ func handleClients(ln net.Listener, kvs *keyValueServer) {
 
 func handleKvActions(kvs *keyValueServer) {
 	for act := range kvs.actionChannel {
-		// TODO: handle failures
 		switch act.op {
 		case Get:
 			values := kvs.store.Get(act.key)
@@ -240,7 +200,6 @@ func handleRead(cli *client, kvs *keyValueServer) {
 		// Check if client closed or terminated connection
 		case io.EOF:
 			removeClient(cli.id, kvs)
-			// fmt.Printf("[%v] disconnected\n", cli.id)
 			return
 		default:
 			fmt.Printf("[%v] error\n", cli.id)
@@ -251,10 +210,7 @@ func handleRead(cli *client, kvs *keyValueServer) {
 func handleWrite(cli *client, kvs *keyValueServer) {
 	for resp := range cli.channel {
 		message := fmt.Sprintf("%v:%v\n", resp.key, resp.value)
-		_, writeErr := cli.writer.WriteString(message)
-		if writeErr != nil {
-			fmt.Println("Error writing:", writeErr.Error())
-		}
+		cli.writer.WriteString(message)
 		cli.writer.Flush()
 	}
 }
@@ -264,7 +220,6 @@ func registerClient(conn net.Conn, kvs *keyValueServer) *client {
 	reader, writer := bufio.NewReader(conn), bufio.NewWriter(conn)
 	channel := make(chan response, bufferSize)
 	cli := &client{id: id, reader: reader, writer: writer, conn: conn, channel: channel}
-	// FIXME: only sends to registration channel now, does not wait for confirmation
 	kvs.registrationChannel <- cli
 	return cli
 }
@@ -286,7 +241,6 @@ func messageToAction(message []byte, cli *client) actionRequest {
 	return act
 }
 
-// FIXME: cannot use strings package
 func parseMessage(message []byte) [][]byte {
 	message = message[:len(message)-1]
 	splitted := bytes.Split(message, []byte(":"))
