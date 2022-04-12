@@ -23,6 +23,8 @@ const (
 	Undefined
 )
 
+const bufferSize = 500
+
 func ToActionOperation(opString string) (ActionOperation, error) {
 	var op ActionOperation
 	switch opString {
@@ -84,17 +86,26 @@ type actionRequest struct {
 	cli    *client
 }
 
+type response struct {
+	key   string
+	value string
+}
+
 type client struct {
 	id     string
 	reader *bufio.Reader
 	writer *bufio.Writer
 	conn   net.Conn
 	// FIXME: think of a better name
-	channel chan [][]byte
+	channel chan response
 }
 
 func (cli client) String() string {
 	return fmt.Sprintf("Client: %v", cli.id)
+}
+
+func (cli client) isBufferFull() bool {
+	return len(cli.channel) >= bufferSize
 }
 
 // New creates and returns (but does not start) a new KeyValueServer.
@@ -186,7 +197,9 @@ func handleClients(ln net.Listener, kvs *keyValueServer) {
 			// FIXME: can't use os package
 			os.Exit(1)
 		}
-		go handleConnection(conn, kvs)
+		cli := registerClient(conn, kvs)
+		go handleRead(cli, kvs)
+		go handleWrite(cli, kvs)
 	}
 }
 
@@ -195,8 +208,13 @@ func handleKvActions(kvs *keyValueServer) {
 		// TODO: handle failures
 		switch act.op {
 		case Get:
-			value := kvs.store.Get(act.key)
-			act.cli.channel <- value
+			values := kvs.store.Get(act.key)
+			for _, value := range values {
+				if !act.cli.isBufferFull() {
+					resp := response{act.key, string(value)}
+					act.cli.channel <- resp
+				}
+			}
 		case Put:
 			kvs.store.Put(act.key, act.values[0])
 		case Update:
@@ -207,12 +225,7 @@ func handleKvActions(kvs *keyValueServer) {
 	}
 }
 
-// Handles incoming requests.
-func handleConnection(conn net.Conn, kvs *keyValueServer) {
-	// Register client: create client + add to client pool
-	cli := registerClient(conn, kvs)
-	fmt.Printf("[%v] connected!\n", cli.id)
-	// Listen to client
+func handleRead(cli *client, kvs *keyValueServer) {
 	for {
 		// Listen to client
 		message, err := cli.reader.ReadString('\n')
@@ -224,23 +237,10 @@ func handleConnection(conn net.Conn, kvs *keyValueServer) {
 			// Send to actionChannel to handle action
 			kvs.actionChannel <- act
 
-			// If Get, need to send responses to client
-			if act.op == Get {
-				values := <-cli.channel
-				// Send responses
-				for _, value := range values {
-					response := fmt.Sprintf("%v:%v\n", act.key, string(value))
-					_, writeErr := cli.writer.WriteString(response)
-					if writeErr != nil {
-						fmt.Println("Error writing:", writeErr.Error())
-					}
-					cli.writer.Flush()
-				}
-			}
 		// Check if client closed or terminated connection
 		case io.EOF:
 			removeClient(cli.id, kvs)
-			fmt.Printf("[%v] disconnected\n", cli.id)
+			// fmt.Printf("[%v] disconnected\n", cli.id)
 			return
 		default:
 			fmt.Printf("[%v] error\n", cli.id)
@@ -248,10 +248,21 @@ func handleConnection(conn net.Conn, kvs *keyValueServer) {
 	}
 }
 
+func handleWrite(cli *client, kvs *keyValueServer) {
+	for resp := range cli.channel {
+		message := fmt.Sprintf("%v:%v\n", resp.key, resp.value)
+		_, writeErr := cli.writer.WriteString(message)
+		if writeErr != nil {
+			fmt.Println("Error writing:", writeErr.Error())
+		}
+		cli.writer.Flush()
+	}
+}
+
 func registerClient(conn net.Conn, kvs *keyValueServer) *client {
 	id := conn.RemoteAddr().String()
 	reader, writer := bufio.NewReader(conn), bufio.NewWriter(conn)
-	channel := make(chan [][]byte)
+	channel := make(chan response, bufferSize)
 	cli := &client{id: id, reader: reader, writer: writer, conn: conn, channel: channel}
 	// FIXME: only sends to registration channel now, does not wait for confirmation
 	kvs.registrationChannel <- cli
